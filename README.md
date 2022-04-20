@@ -1,0 +1,1 @@
+This directory contains the pico-wifi subdirectory, with code which communicates with an ESP8266 WiFi module over UART. The wemos-wifi subdirectory contains code which connects to the local internet router, establishes a safe connection with an MQTT broker, and sends any changes to topics to the Pico via UART.
