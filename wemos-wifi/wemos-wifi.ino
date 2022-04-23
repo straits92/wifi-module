@@ -251,32 +251,26 @@ void loop() {
     reconnect();
   }
 
-//Check if the problem is the way Wemos reads, or the way Pico writes to the Wemos.
-//Maybe it introduces the need to manage traffic on Tx and Rx,to and from, which is done incorrectly?
-// why is it seemingly reading character by character? is that how pico is sending it?
+  if (Serial.available() > 0) {
+    /* form the received message */
+    char incomingChar;
+    int i = 0;
+    while (Serial.available() > 0) {
+      // read the incoming byte:
+      incomingChar = Serial.read();
+        received[i] = incomingChar;
+        i++;
+    }
+    received[i]='\0';
 
-//  if (Serial.available() > 0) {
-//    
-//    char incomingChar;
-//    int i = 0;
-//    while (Serial.available() > 0) {
-//      // read the incoming byte:
-//      incomingChar = Serial.read();
-//        received[i] = incomingChar;
-//        i++;
-//        
-//      // form received msg
-////      if(incomingChar!='\n' && incomingChar!='\r') {
-////        received[i] = incomingChar;
-////        i++;
-////      } else {
-////        // terminate on newline, or just skip
-////        break;
-////      }
-//    }
-//    received[i]='\0';
-//    clientptr->publish(mqtt_pubs_topic_status, received);
-//  }
+    /* publish message from Pico to MQTT */
+    clientptr->publish(mqtt_pubs_topic_status, received);
+
+    /* length of msg from Pico */
+    clientptr->publish(mqtt_pubs_topic_status, "Rec_len_pico: ");
+    String str_i = String(i);
+    clientptr->publish(mqtt_pubs_topic_status, str_i.c_str());
+  }
   
   clientptr->loop();
   delay(300);
