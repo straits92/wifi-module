@@ -17,10 +17,9 @@
 #include <string.h>
 #include "hardware/gpio.h"
 
-#define PRINT_BUFFER_TO_UART 1
 #define BUFFER_SIZE 512
 #define UART_ID uart0
-#define PARITY    UART_PARITY_NONE
+#define PARITY UART_PARITY_NONE
 #define UART_TX_PIN 0
 #define UART_RX_PIN 1
 
@@ -30,10 +29,8 @@ const int data = 8;
 const int stop = 1;
 const char* device_on = "device=on";
 const char* device_off = "device=off";
-const char* wifi_connected = "WiFi connected";
-const char* generic = "Substring received from Rx by Pico:";
-char tmp_msg[BUFFER_SIZE];
-
+const char* pico_response_title = "\nPICO_ECHO: ";
+char msg_from_wifi[BUFFER_SIZE];
 
 int main() {
     stdio_init_all(); 
@@ -44,40 +41,42 @@ int main() {
     gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
     gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
     
-    // the LED
+    // setting up the LED
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);   
     
-	uart_puts(UART_ID, "PICO INIT LINE 1\n");
-	int i = 0;
-
+	uart_puts(UART_ID, "Putting the first few characters to UART...\n");
+	int payload_size = 0;
     while (1) {
-    	/* uart_getc no longer in a while loop which checks if uart_is_readable, 
-    	 * because the looping is quicker than the UART transmission and might
-    	 * actually exit at uart_is_readable = false before the entire message
-    	 * is received from the Wemos. */
-		char ch = uart_getc(UART_ID);
-		if(ch!='\n' && ch!='\r') {
-			tmp_msg[i++] = ch;
-		} else {
-			tmp_msg[i] = '\0';
+    	/* Pico default CPU speed is 125 MHz. UART is configured as 115200 baud rate.
+    	 * The looping is quicker than the UART transmission. So uart_is_readable may
+    	 * return false before the entire message is received from the Wemos. Thus,
+    	 * message processing done only after end of message is detected, \n */
+    	if (uart_is_readable(UART_ID)) {
+    		/* if uart_is_readable but no character available, uart_getc will block */
+			char ch = uart_getc(UART_ID);
+			if(ch!='\n' && ch!='\r') {
+				msg_from_wifi[payload_size++] = ch;
+			} else {
+				msg_from_wifi[payload_size] = '\0';
+				if (payload_size != 0) {
+					uart_puts(UART_ID, pico_response_title);	
+					uart_puts(UART_ID, msg_from_wifi);
+				
+					// check if msg fits on/off template
+					if (strstr(msg_from_wifi, device_on) != NULL) {
+						gpio_put(LED_PIN, 1);
+					}
+					if (strstr(msg_from_wifi, device_off) != NULL) {
+						gpio_put(LED_PIN, 0);
+					} 
 
-			if (i != 0) {
-
-				/* This is also duplicated when sent. */
-				uart_puts(UART_ID, "\nPICO_ECHO: ");	
-				uart_puts(UART_ID, tmp_msg);
-			
-				// check if msg fits on/off template
-				if (strstr(tmp_msg, device_on) != NULL) {
-					gpio_put(LED_PIN, 1);
+					// check if Wemos dropped internet connection
+					//... decide on tasks when no internet
 				}
-				if (strstr(tmp_msg, device_off) != NULL) {
-					gpio_put(LED_PIN, 0);
-				} 
-			}
 
-			i = 0;
-		} 
+				payload_size = 0;
+			} 
+		}
     }
 }
