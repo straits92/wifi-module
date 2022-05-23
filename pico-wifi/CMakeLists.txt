@@ -13,7 +13,8 @@ add_executable(pico_wifi pico_wifi.c)
 pico_enable_stdio_usb(pico_wifi 0)
 
 # common dependencies
-target_link_libraries(pico_wifi pico_stdlib)
+# pico_multicore later 
+target_link_libraries(pico_wifi pico_stdlib hardware_spi pico_multicore) 
 
 # compile to several formats
 pico_add_extra_outputs(pico_wifi)
