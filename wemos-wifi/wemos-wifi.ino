@@ -12,7 +12,7 @@
  */
 
 /** 
-Receives remote MQTT messages and transmits them on Serial. Tests the onboard LED blink. 
+Receives remote MQTT messages and transmits them on Serial to pico. 
 **/
 
 /* libraries for necessary methods */
@@ -20,9 +20,10 @@ Receives remote MQTT messages and transmits them on Serial. Tests the onboard LE
 #include <PubSubClient.h>
 #include <string.h>
 
-/* libraries for private data */
+/* libraries for private data, strings */
 #include "wifi.h"
 #include "broker.h"
+#include "format.h"
 
 /* libraries dictated by HiveMQ */
 #include <time.h>
@@ -31,19 +32,14 @@ Receives remote MQTT messages and transmits them on Serial. Tests the onboard LE
 #include <LittleFS.h>
 #include <CertStoreBearSSL.h>
 
-#define DEVICE_ID "LED_0"
-#define DEVICE_ID_STATUS "LED_0_STATUS"
-#define DEVICE_ON "device=on"
-#define DEVICE_OFF "device=off"
-#define STR_CONFIRM_STATE "confirmNewState="
-#define MSG_BUFFER_SIZE (500)
-
-// strings to be checked for
-const char* device_on = "device=on";
-const char* device_off = "device=off";
-
 // the selected LED hardware to control
 int ledPin = LED_BUILTIN;
+
+// state variables. offline devices and sensors are -1
+int connection_status = 0; // 0: no wifi, 1: wifi, 2: wifi+mqtt
+int sensor_array[3] = {-1, -1, -1}; // humidity, temperature, light intensity
+int device_array[1] = {-1}; // LED
+int device_array_old[1] = {-1}; // LED
 
 // A single, global CertStore which can be used by all connections.
 // Needs to stay live the entire time any of the WiFiClientBearSSLs
@@ -63,12 +59,13 @@ int value = 0;
 // State of the device
 int state = LOW;
 
+/*** mqtt and connectivity functions ***/
 void initMQTTClient(int verbose) {
   /* setting up the certificate */
   int numCerts = certStore.initCertStore(LittleFS, PSTR("/certs.idx"), PSTR("/certs.ar"));
   if (verbose != 0) {Serial.printf("Number of CA certs read: %d\n", numCerts);}
   if (numCerts == 0) {
-    if (verbose != 0) {Serial.printf("No certs found. Did you run certs-from-mozilla.py and upload the LittleFS directory before running?\n");}
+    if (verbose != 0) {Serial.printf("No certs found. Run certs-from-mozilla.py, upload LittleFS directory, then run.\n");}
     return; // Can't connect to anything w/o certs!
   }
 
@@ -82,17 +79,35 @@ void initMQTTClient(int verbose) {
   clientptr->setCallback(callback);
 }
 
-void shortBlink(int duration){
-  digitalWrite(ledPin, LOW); 
-  delay(duration);
-  digitalWrite(ledPin, HIGH); 
-  delay(duration*6);
+void setup_mqtt() {
+     // Attempt to connect to broker; chosen clientID is the device id
+    // Serial.println("Attempting MQTT connection...");
+    String clientID = "WemosD1Mini-";
+    clientID+=String(random(0xffff), HEX);
+    shortBlink(150);
+    if (clientptr->connect(clientID.c_str(), mqtt_username, mqtt_password)) {
+      Serial.println("WiFi module connected to MQTT broker");
+      // Subscribe to the control topic of device0
+      if(clientptr->subscribe(topic_device0_value)) {
+        clientptr->publish(topic_device0_value, "D=0;");
+        clientptr->publish(topic_general, "WiFi module subscribed to topic:");
+        clientptr->publish(topic_general, topic_device0_value);
+
+      } else {
+        Serial.println("Failed to subscribe to the specified topic");
+      }
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(clientptr->state());
+      Serial.println(" trying again in 2000 mseconds");
+      delay(2000);
+    }
 }
 
 void setup_wifi() {
   delay(10);
   Serial.println();
-  Serial.print("Connecting to ");
+  Serial.print("WiFi name: ");
   Serial.println(ssid);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
@@ -103,10 +118,24 @@ void setup_wifi() {
 
   randomSeed(micros());
    
-  // Serial.println("");
   Serial.println("WiFi connected");
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP()); // or just the ssid
+}
+
+/* Loop until reconnected to wifi, then to mqtt */
+void reconnect() {
+  // Loop until we're reconnected
+  // Serial.println("In the reconnect() method.");
+  while (!clientptr->connected()) {
+  
+  // the assumption is that if WiFi dropped, client must have lost connection too
+  if(WiFi.status() != WL_CONNECTED) {
+    setup_wifi();
+  } 
+  setup_mqtt();
+
+  }
 }
 
 void setDateTime() {
@@ -128,8 +157,17 @@ void setDateTime() {
   // Serial.printf("%s %s", tzname[0], asctime(&timeinfo));
 }
 
+
+/*** helpers ***/
+void shortBlink(int duration){
+  digitalWrite(ledPin, LOW); 
+  delay(duration);
+  digitalWrite(ledPin, HIGH); 
+  delay(duration*6);
+}
+
 void printMessage(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived [");
+  Serial.print("Message arrived for topic: [");
   Serial.print(topic);
   Serial.print("] ");
   for (int i = 0; i < length; i++) {
@@ -146,14 +184,33 @@ void printToMCU(char* topic, byte* payload, unsigned int length) {
   Serial.println();
 }
 
+void readFromMCU() {
+    char incomingChar;
+    int i = 0;
+    while (Serial.available() > 0) {
+      // read the incoming byte:
+      incomingChar = Serial.read();
+      received[i] = incomingChar;
+      i++;
+    }
+    received[i]='\0';
+    // return i;
+}
+
+
  /*
-  * MQTT callback function. It is always called when? we receive a message on the subscribed topics.
+  * MQTT callback function. Receives the remote payload and the topic it was published to.
+  * Forwards this payload to MCU and its devices.
   ****/
 void callback(char* topic, byte* payload, unsigned int length) {
   int i;
+  int device_index = 0;
   char string[50];
   char lowerString[50];
-  // printMessage(topic, payload, length);
+
+  // send to Pico. the topic may specify the device.
+  // check if this is done constantly again, maybe best
+  // done in conditionals below
   printToMCU(topic, payload, length);
 
   // Copy the payload into a C-String and convert all letters into lower-case
@@ -164,60 +221,34 @@ void callback(char* topic, byte* payload, unsigned int length) {
   string[i]=0;
   lowerString[i]=0;
 
-  // If the payload contains one of the predefined messages then turn on/off the LED
-  uint8_t newState = -1;
-  if(strcmp(lowerString, device_on) == 0) {
-   newState = LOW;
-   digitalWrite(ledPin, LOW); 
-   //Serial.println(device_on); // doesn't seem to be read properly on Pico
-  }
-  else if(strcmp(lowerString, device_off) == 0) {
-   newState = HIGH;
-   digitalWrite(ledPin, HIGH); 
-   //Serial.println(device_off);
-  }
+  /* Check if payload fits protocol for a given device; for now only device0, LED */
+  if (strcmp(topic, topic_device0_value) == 0){
+    device_index = 0;
 
-  if(newState == LOW || newState == HIGH) {
-    state = newState;
-    sprintf(msg, "%s%d", STR_CONFIRM_STATE, state);
-    clientptr->publish(mqtt_pubs_topic_status, msg);
-  }  else {
-    clientptr->publish(mqtt_pubs_topic_status, "Payload contained neither of the predefined messages.");
-  }
+    // check delimiters and extract num value
+    strcpy(payload_copy, string);
+    substring = strtok(payload_copy, "=");
+    substring = strtok(NULL, ";");
+    int val = String(substring).toInt();
 
-}
+    // remember old state of device
+    device_array_old[device_index] = device_array[device_index];
+    device_array[device_index] = val;
 
-/* in case connection is lost */
-void reconnect() {
-  // Loop until we're reconnected
-  // Serial.println("In the reconnect() method.");
-  while (!clientptr->connected()) {
-  
-  // the assumption is that if WiFi dropped, client must have lost connection too
-  if(WiFi.status() != WL_CONNECTED) {
-    setup_wifi();
-  } 
-  
-    // Attempt to connect to broker; chosen clientID is the device id
-    // Serial.println("Attempting MQTT connection...");
-    String clientID = "WemosD1Mini-";
-    clientID+=String(random(0xffff), HEX);
-    shortBlink(150);
-    if (clientptr->connect(clientID.c_str(), mqtt_username, mqtt_password)) {
-      Serial.println("WiFi module connected to MQTT broker");
-      // Subscribe to a topic
-      if(clientptr->subscribe(mqtt_subs_topic)) {
-        clientptr->publish(mqtt_subs_topic, DEVICE_OFF);
-        clientptr->publish(mqtt_pubs_topic_status, "WiFi module subscribed to topic");
-      } else {
-        Serial.println("Failed to subscribe to the specified topic");
-      }
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(clientptr->state());
-      Serial.println(" trying again in 2000 mseconds");
-      delay(2000);
+    // a sanity check on the wifi board, for device0 only
+    if(val > 0) {
+     digitalWrite(ledPin, LOW); 
     }
+    else {
+     digitalWrite(ledPin, HIGH); 
+    }
+
+    // state change could be tracked for each index (i.e. for each device)
+    if (device_array_old[device_index] != device_array[device_index]) {
+      sprintf(msg, "%s%s is [%d]", "New state of topic ", topic, val);
+      clientptr->publish(topic_general, msg);
+      clientptr->publish(topic_device0_status, String(val).c_str());
+    }    
   }
 }
 
@@ -225,16 +256,16 @@ void reconnect() {
  * Called once during the initialization phase after reset
  ****/
 void setup() {
-  // setup serial port with proper baud rate. seen as uart on pico.
+  // setup serial port with same baud rate as UART on pico
   delay(500);
   Serial.begin(115200);
   delay(500);
   
-  // initialize some pin for turning on onboard LED
+  // initialize onboard LED
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, HIGH); // high is off
   
-  // setup prerequisites to safe MQTT
+  // start certification module, connect to the internet
   LittleFS.begin();
   setup_wifi();
   setDateTime();
@@ -248,30 +279,37 @@ void setup() {
  ****/
 void loop() {  
   if (!clientptr->connected()) {
+    Serial.print("Connection dropped - reconnecting...");
+    connection_status = 0;
     reconnect();
   }
 
-  if (Serial.available() > 0) {
-    /* form the received message */
-    char incomingChar;
-    int i = 0;
-    while (Serial.available() > 0) {
-      // read the incoming byte:
-      incomingChar = Serial.read();
-        received[i] = incomingChar;
-        i++;
-    }
-    received[i]='\0';
+  /* send an online-verified time to the pico */
+  // ...
 
-    /* publish message from Pico to MQTT */
-    clientptr->publish(mqtt_pubs_topic_status, received);
+  /* Read from pico and publish its msgs, only if wifi+mqtt */
+  if (Serial.available() > 0 /*&& connection_status == 2*/) {
+    
+    /* build string from Pico in "received" */
+//    int message_length = readFromMCU();
+    readFromMCU();
 
-    /* length of msg from Pico */
-    clientptr->publish(mqtt_pubs_topic_status, "Rec_len_pico: ");
-    String str_i = String(i);
-    clientptr->publish(mqtt_pubs_topic_status, str_i.c_str());
+    /* determine which topic to post Pico data to, based on format */
+    // sensors topics if received contains Sn=num; device topics if Dn=num;
+    // update the sensors or devices array accordingly
+
+
+    /* publish message from MCU to status topic, indiscriminately (to be differentiated by conditional case) */
+    clientptr->publish(topic_pico_status, received);
+
+    /* message length checked for debugging */
+//    clientptr->publish(topic_pico_status, "Pico msg length: ");
+//    String str_i = String(message_length);
+//    clientptr->publish(topic_pico_status, str_i.c_str());
   }
   
   clientptr->loop();
-  delay(300);
+
+  // is this delay at all needed? remove?
+  delay(200);
 }
