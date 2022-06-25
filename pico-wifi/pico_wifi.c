@@ -20,6 +20,7 @@
 #include "pico/binary_info.h"
 #include "hardware/spi.h"
 #include "hardware/uart.h"
+#include "hardware/pwm.h"
 
 #include <stdio.h>
 #include <math.h>
@@ -42,24 +43,47 @@ uint8_t swf = 0; // sensor write flag
 uint8_t def = 0; // device execution flag
 
 /* global variables for devices and sensors */
-uint8_t devices[DEVICE_COUNT] = {0};
+uint8_t devices[DEVICE_COUNT] = {0, 0};
 float sensors[SENSOR_COUNT] = {0.0, 0.0};
 uint32_t command_from_core0 = 0;
 uint timer_count = 0;
 
+/* for the PWM */
+uint32_t wrap_point = 1000; // default
+uint32_t wrap_point_of_freq(uint hertz) {
+	uint32_t nanos = 1000000000 / hertz; // get cycle length for desired operating frequency
+	return nanos / PICO_CYCLE_NS; // pico has a base freq of 125MHz; 125000000000Hz. A cycle is 8ns. The wrap point is a multiple of this.
+}
+
 /* interrupt handler when core0(comm) has something for core1(devices/sensors) */
 void core1_interrupt_handler() {
+
+	uint device_index = 0; 
+	uint device_value = 0;
+	int delay = 20; // ms
+
 	while (multicore_fifo_rvalid()){
 		/* data in FIFO pipe may be used to differentiate which
-		 * device a queued command is for. */
+		 * device a queued command is for. so since the queued 
+		 * data is uint32_t, maybe package as follows. the first 16
+		 * bits (0 to 15) are enough for a 0 to 65535 range. every higher
+		 * bit should be an identifier for the device, leaving enough
+		 * space for 16 devices. */
 		command_from_core0 = multicore_fifo_pop_blocking();
 	}
 	multicore_fifo_clear_irq();
 	def = 1; // signify that a device behaviour is to be changed
 
-	/* rapidly executing device commands in the interrupt might hog 
+	// extract the device info from the fifo command; 0 is the first light device
+	// can be tested by adding a second device; another LED
+	// while ((command_from_core0>>(16+device_index)) != 0) {
+	// 	device_index++;
+	// }
+
+	/* many incoming device commands might hog 
 	 * core1 thread and stall the sensor reading */
-	smooth_change(command_from_core0, devices, 0, 20);
+	device_value = command_from_core0 % 65535;
+	smooth_change(command_from_core0, devices, device_index, delay, wrap_point);
 }
 
 /* main program for core1 reads sensors based on timer flag, 
@@ -71,6 +95,13 @@ void core1_entry() {
 	multicore_fifo_clear_irq();
 	irq_set_exclusive_handler(SIO_IRQ_PROC1, core1_interrupt_handler);
 	irq_set_enabled(SIO_IRQ_PROC1, true);
+
+	/* for the AC dimmer */
+	/* set up a PWM with a duty cycle % */
+
+	/* configure the interrupt on a pin which should read the 
+	 * zero-crossing AC signal at about 100Hz. */
+	// ...
 
 	while(1) {
 		tight_loop_contents();
@@ -109,6 +140,16 @@ bool repeating_timer_callback(struct repeating_timer *t) {
 int main() {
     stdio_init_all(); 
 
+    // initialize PWM (its counter goes to 65535)
+    gpio_set_function(PWM_GPIO, GPIO_FUNC_PWM);
+    uint slice_num = pwm_gpio_to_slice_num(PWM_GPIO);// see which PWM channel comes from this pin
+    wrap_point = wrap_point_of_freq(PWM_OPERATING_FREQ);
+    pwm_set_wrap(slice_num, wrap_point);
+
+    // set PWM channel level as duty % = 0 to begin with
+    pwm_set_chan_level(slice_num, PWM_CHAN_A, 0);
+    pwm_set_enabled(slice_num, true); // PWM enabled on that channel
+
     // initialize SPI 
 	spi_init(SPI_PORT, COMM_SPEED);
 	gpio_set_function(SCK, GPIO_FUNC_SPI);
@@ -138,7 +179,7 @@ int main() {
 	multicore_launch_core1(core1_entry);
 
 	// set digipot low to begin with
-	smooth_change(0, devices, 0, 20);
+	smooth_change(0, devices, 0, 20, wrap_point);
 
 	uart_puts(UART_ID, "Putting the first few characters to UART...\n");
 	int payload_size = 0;
@@ -165,6 +206,26 @@ int main() {
 
 					/* handle incoming commands */
 					if (strstr(msg_from_wifi, device0_message) != NULL) {
+
+/*					if (msg_from_wifi[0] == 'D') {
+
+						// make a local copy of the message 
+						strcpy(msg_copy, msg_from_wifi);
+
+					    // extract the device specifier number from msg, between D and =
+					    device_index_from_command = strtok(msg_from_wifi, "D");
+					    device_index_from_command = strtok(NULL, "=");
+					    int device_index = 0;
+					    device_index = atoi(device_index_from_command);
+
+						// extract value from msg between = and ;
+					    device_value_from_command = strtok(msg_copy, "=");
+					    device_value_from_command = strtok(NULL, ";");
+					    int val = atoi(device_value_from_command);
+
+					    // package the device specifier into val
+					    val = val | ((!!device_index)<<(16+device_index));*/
+
 						// extract value from msg
 					    substring_from_command = strtok(msg_from_wifi, "=");
 					    substring_from_command = strtok(NULL, ";");

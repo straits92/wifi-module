@@ -11,9 +11,18 @@ void write_to_digipot(uint8_t intensity) {
 	gpio_put(CS, 1);
 }
 
+/* take the remote command between 0 and 127 and convert to between 0 and 1000 for PWM */
+long map_to_pwm(long x, long in_min, long in_max, long out_min, long out_max) {
+	return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
 // gradual change from current value to desired value
-void smooth_change(uint8_t desired_intensity, uint8_t *device_array, uint device_index, int delay) {
+void smooth_change(uint8_t desired_intensity, uint8_t *device_array, uint device_index, int delay, uint32_t wrap_point) {
 	uint8_t current_intensity = device_array[device_index];
+
+	long pwm_value_desired = map_to_pwm((long)desired_intensity, 0, 128, 0, wrap_point);
+	long pwm_value_current = map_to_pwm((long)current_intensity, 0, 128, 0, wrap_point);
+	uint slice_num = pwm_gpio_to_slice_num(PWM_GPIO);
 
 	if (desired_intensity == current_intensity) {
 		return;
@@ -30,6 +39,25 @@ void smooth_change(uint8_t desired_intensity, uint8_t *device_array, uint device
 		}
 	}
 	write_to_digipot(desired_intensity); // avoid off by one
+
+	// for the PWM
+	// much slower because steps were magnified from 0 to 128, to be 0 to 1000
+	// so just give it larger increments, but avoid going negative
+	if (desired_intensity == current_intensity) {
+		return;
+	}
+	else if (pwm_value_desired > pwm_value_current) {
+		for (long i = pwm_value_current; i < pwm_value_desired; i++) {
+			sleep_ms(delay);
+			pwm_set_chan_level(slice_num, PWM_CHAN_A, i);
+		}
+	} else {
+		for (long j = pwm_value_current; (j > pwm_value_desired); j--) {
+			sleep_ms(delay);
+			pwm_set_chan_level(slice_num, PWM_CHAN_A, j);
+		}
+	}
+	pwm_set_chan_level(slice_num, PWM_CHAN_A, pwm_value_desired); // avoid off by one
 
 	// make array update safer
 	device_array[device_index] = desired_intensity;
