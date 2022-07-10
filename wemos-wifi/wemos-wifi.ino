@@ -12,10 +12,10 @@
  */
 
 /** 
-Receives remote MQTT messages and transmits them on Serial to pico. 
+Sends/receives remote MQTT messages and transmits them on Serial to pico. 
 **/
 
-/* libraries for necessary methods */
+/* libraries for WiFi, MQTT methods */
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <string.h>
@@ -32,14 +32,10 @@ Receives remote MQTT messages and transmits them on Serial to pico.
 #include <LittleFS.h>
 #include <CertStoreBearSSL.h>
 
-// the selected LED hardware to control
-int ledPin = LED_BUILTIN;
-
-// state variables. offline devices and sensors are -1
-int connection_status = 0; // 0: no wifi, 1: wifi, 2: wifi+mqtt
-int sensor_array[3] = {-1, -1, -1}; // humidity, temperature, light intensity
-int device_array[1] = {-1}; // LED
-int device_array_old[1] = {-1}; // LED
+/* libraries for time sync */
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <TimeLib.h>
 
 // A single, global CertStore which can be used by all connections.
 // Needs to stay live the entire time any of the WiFiClientBearSSLs
@@ -50,14 +46,10 @@ BearSSL::CertStore certStore;
 WiFiClientSecure espClientSecure;
 PubSubClient* clientptr;
 
-// additional from HiveMQ
-unsigned long lastMsg = 0;
-char msg[MSG_BUFFER_SIZE];
-char received[MSG_BUFFER_SIZE];
-int value = 0;
-
-// State of the device
-int state = LOW;
+// NTP client
+const long utcOffsetInSeconds = 7800; // UTC+02 timezone offset
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", utcOffsetInSeconds);
 
 /*** mqtt and connectivity functions ***/
 void initMQTTClient(int verbose) {
@@ -80,19 +72,16 @@ void initMQTTClient(int verbose) {
 }
 
 void setup_mqtt() {
-     // Attempt to connect to broker; chosen clientID is the device id
     // Serial.println("Attempting MQTT connection...");
     String clientID = "WemosD1Mini-";
     clientID+=String(random(0xffff), HEX);
     shortBlink(150);
     if (clientptr->connect(clientID.c_str(), mqtt_username, mqtt_password)) {
       Serial.println("WiFi module connected to MQTT broker");
-      // Subscribe to the control topic of device0
-      if(clientptr->subscribe(topic_device0_value)) {
-        clientptr->publish(topic_device0_value, "D=0;");
+      if(clientptr->subscribe(topic_device0_value)) { // subscribing to one topic seems to suffice
+        clientptr->publish(topic_device0_value, "D0=0;"); // initial off-value to device
         clientptr->publish(topic_general, "WiFi module subscribed to topic:");
         clientptr->publish(topic_general, topic_device0_value);
-
       } else {
         Serial.println("Failed to subscribe to the specified topic");
       }
@@ -125,16 +114,11 @@ void setup_wifi() {
 
 /* Loop until reconnected to wifi, then to mqtt */
 void reconnect() {
-  // Loop until we're reconnected
-  // Serial.println("In the reconnect() method.");
   while (!clientptr->connected()) {
-  
-  // the assumption is that if WiFi dropped, client must have lost connection too
-  if(WiFi.status() != WL_CONNECTED) {
-    setup_wifi();
-  } 
-  setup_mqtt();
-
+    if(WiFi.status() != WL_CONNECTED) {
+      setup_wifi();
+    } 
+    setup_mqtt(); // if wifi dropped, mqtt lost connection too
   }
 }
 
@@ -166,18 +150,8 @@ void shortBlink(int duration){
   delay(duration*6);
 }
 
-void printMessage(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived for topic: [");
-  Serial.print(topic);
-  Serial.print("] ");
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
-}
-
 void printToMCU(char* topic, byte* payload, unsigned int length) {
-  Serial.println();
+  // Serial.println();
   for (int i = 0; i < length; i++) {
     Serial.print((char)payload[i]);
   }
@@ -188,69 +162,68 @@ void readFromMCU() {
     char incomingChar;
     int i = 0;
     while (Serial.available() > 0) {
-      // read the incoming byte:
-      incomingChar = Serial.read();
+      incomingChar = Serial.read(); // incoming byte
       received[i] = incomingChar;
       i++;
+      if (incomingChar == '\n') {break;}
     }
     received[i]='\0';
     // return i;
 }
 
-
  /*
   * MQTT callback function. Receives the remote payload and the topic it was published to.
   * Forwards this payload to MCU and its devices.
+  * Device topics are changed by being posted to from a mobile app or MQTT terminal. So
+  * when the device integer and value are extracted here, they are just saved into
+  * arrays on this WiFi module. But the entire payload is forwarded to the MCU, which
+  * has to extract both of these for itself anyways.
   ****/
 void callback(char* topic, byte* payload, unsigned int length) {
   int i;
   int device_index = 0;
   char string[50];
-  char lowerString[50];
 
-  // send to Pico. the topic may specify the device.
-  // check if this is done constantly again, maybe best
-  // done in conditionals below
+  // send payload from MQTT to Pico. the topic may specify the device.
   printToMCU(topic, payload, length);
 
   // Copy the payload into a C-String and convert all letters into lower-case
   for (i = 0; i < length; i++) {
-    string[i] = (char)payload[i];
-    lowerString[i] = tolower(string[i]);
+    string[i] = (char)payload[i]; // if lowercase, tolower(string[i]);
   }
   string[i]=0;
-  lowerString[i]=0;
 
-  /* Check if payload fits protocol for a given device; for now only device0, LED */
-  if (strcmp(topic, topic_device0_value) == 0){
-    device_index = 0;
+  /* Check if payload fits protocol for a given device; for now only device0, LED
+   * Protocol: payloads sent to device topics, starting with 'D', contain commands. */
+  if (/*(strstr(topic, "devices") != NULL) &&*/ (payload[0] == 'D')){
 
-    // check delimiters and extract num value
-    strcpy(payload_copy, string);
-    substring = strtok(payload_copy, "=");
-    substring = strtok(NULL, ";");
-    int val = String(substring).toInt();
+    // extract the integer associated with the device
+    strcpy(payload_copy_1, string);
+    scanned_substring = strtok(payload_copy_1, "D");
+    scanned_substring = strtok(NULL, "=");
+    device_index = String(scanned_substring).toInt();
+
+    // extract num value which will modulate device power
+    strcpy(payload_copy_0, string);
+    scanned_substring = strtok(payload_copy_0, "=");
+    scanned_substring = strtok(NULL, ";");
+    int val = String(scanned_substring).toInt();
 
     // remember old state of device
     device_array_old[device_index] = device_array[device_index];
     device_array[device_index] = val;
 
-    // a sanity check on the wifi board, for device0 only
-    if(val > 0) {
-     digitalWrite(ledPin, LOW); 
-    }
-    else {
-     digitalWrite(ledPin, HIGH); 
-    }
+    // sanity check: Wemos LED is off if a device toggled to 0, and on for bigger than 0
+    if(val > 0) {digitalWrite(ledPin, LOW); } else {digitalWrite(ledPin, HIGH);}
 
     // state change could be tracked for each index (i.e. for each device)
     if (device_array_old[device_index] != device_array[device_index]) {
-      sprintf(msg, "%s%s is [%d]", "New state of topic ", topic, val);
-      clientptr->publish(topic_general, msg);
-      clientptr->publish(topic_device0_status, String(val).c_str());
+      sprintf(device_msg_to_mqtt, "New state of topic [%s] is [%d]; device index: [%d]; device value [%d]", topic, val, device_index, val);
+      clientptr->publish(topic_general, device_msg_to_mqtt);
     }    
   }
 }
+
 
 /*
  * Called once during the initialization phase after reset
@@ -269,13 +242,22 @@ void setup() {
   LittleFS.begin();
   setup_wifi();
   setDateTime();
+
+  // start tracking time
+  timeClient.begin();
   
   // set up MQTT and the certificate for secure comm with broker
   initMQTTClient(0);
+
+  // set up the working sensor bits upon initialization
+  for (int i = 0; i < sensors_online_qty; i++) {
+    sensors_online = sensors_online | (1<<i);
+  }
 }
 
 /*
- * This function will be called after setup() in an infinite loop
+ * Infinite loop: check connection, check if anything available on UART0 Rx,
+ * from the MCU, and check if the MCU message fits any template.
  ****/
 void loop() {  
   if (!clientptr->connected()) {
@@ -284,32 +266,81 @@ void loop() {
     reconnect();
   }
 
-  /* send an online-verified time to the pico */
-  // ...
 
-  /* Read from pico and publish its msgs, only if wifi+mqtt */
+  /* Read from pico and publish its msgs, only if wifi+mqtt are connected. generally for sensors. */
   if (Serial.available() > 0 /*&& connection_status == 2*/) {
     
     /* build string from Pico in "received" */
-//    int message_length = readFromMCU();
     readFromMCU();
 
-    /* determine which topic to post Pico data to, based on format */
-    // sensors topics if received contains Sn=num; device topics if Dn=num;
-    // update the sensors or devices array accordingly
+    /* determine which topic to post Pico data to, based on format, Sn=x; for sensors, Dn=x; for devices 
+     * Protocol: strings sent from MCU to Serial, starting with 'S', contain sensor data.*/
+    if (received[0] == 'S'){
+      strcpy(received_copy_1, received);
+      strcpy(received_copy_0, received);
+      
+      // extract sensor index: assume it's a single digit right after 'S'
+      int sensor_index_element = String(received_copy_1[1]).toInt();
+//      scanned_substring = strtok(received_copy_1, "S");
+//      scanned_substring = strtok(NULL, "=");
+//      int sensor_index = String(scanned_substring).toInt();
+  
+      // extract sensor reading
+      scanned_substring = strtok(received_copy_0, "=");
+      scanned_substring = strtok(NULL, ";");
+      int sensor_value = String(scanned_substring).toInt(); // or toDouble()
+      float sensor_value_float = String(scanned_substring).toFloat();
+  
+      // remember old reading of sensor and publish new
+      sensor_array_old[sensor_index_element] = sensor_array[sensor_index_element];
+      sensor_array[sensor_index_element] = sensor_value_float;
+      clientptr->publish(sensor_topics[sensor_index_element],received);
 
+      // record which sensors updated
+      sensors_updated = (sensors_updated | (1<<sensor_index_element));
 
-    /* publish message from MCU to status topic, indiscriminately (to be differentiated by conditional case) */
+      // for debugging
+      sprintf(debugging_msg, "Sensor index: [%d], sensor read value [%f], sensors_update: [%d], sensors_online; [%d]", 
+        sensor_index_element, sensor_value_float, sensors_updated, sensors_online);
+      clientptr->publish(topic_general, debugging_msg);
+    }
+
+   /* build the json template with timestamp, and post to topic when all sensors refreshed */
+   if (sensors_updated == sensors_online) { 
+      sensors_updated = 0; // reset updated sensors
+
+      // get time
+      timeClient.update();
+      long epochtime = timeClient.getEpochTime();
+      int date_day = day(epochtime);
+      int date_month = month(epochtime);
+      int date_year = year(epochtime);
+      int hours = timeClient.getHours();
+
+      // format time quantities to show leading zero if they are single-digit
+      char formatted_date[16];
+      char date_day_s[3];
+      char date_month_s[3];
+      char hours_s[3];
+      if (date_day < 10) {sprintf(date_day_s, "0%d",date_day);} else {sprintf(date_day_s, "%d",date_day);}
+      if (date_month < 10) {sprintf(date_month_s, "0%d",date_month);} else {sprintf(date_month_s, "%d",date_month);}
+      if (hours < 10) {sprintf(hours_s, "0%d",hours);} else {sprintf(hours_s, "%d",hours);}
+      sprintf(formatted_date, "%d-%s-%s", date_year, date_month_s, date_day_s);
+
+      // minutes and seconds zeroed instead of timeClient.getFormattedTime()
+      char formatted_time[32];
+      sprintf(formatted_time, "%sT%s:00:00+%s", formatted_date, hours_s, "02:00"); // format 2022-07-09T12:00:00+02:00
+
+      // format and publish the actual json datapoint
+      sprintf(sensors_datapoint_json_msg, sensors_datapoint_json_template, (formatted_time), String(epochtime), 
+        (sensor_array[1]), temperatureunit, (sensor_array[0]), (sensor_array[2]), mobilelink, link);
+      clientptr->publish(topic_sensors_datapoint, sensors_datapoint_json_msg);
+   }
+   
+    /* publish message from MCU to the general Pico status topic, indiscriminately */
     clientptr->publish(topic_pico_status, received);
-
-    /* message length checked for debugging */
-//    clientptr->publish(topic_pico_status, "Pico msg length: ");
-//    String str_i = String(message_length);
-//    clientptr->publish(topic_pico_status, str_i.c_str());
   }
   
   clientptr->loop();
-
-  // is this delay at all needed? remove?
   delay(200);
 }
