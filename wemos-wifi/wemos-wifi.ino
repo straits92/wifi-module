@@ -47,7 +47,7 @@ WiFiClientSecure espClientSecure;
 PubSubClient* clientptr;
 
 // NTP client
-const long utcOffsetInSeconds = 7800; // UTC+02 timezone offset
+const long utcOffsetInSeconds = 7200; // UTC+02 timezone offset
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", utcOffsetInSeconds);
 
@@ -91,6 +91,10 @@ void setup_mqtt() {
       Serial.println(" trying again in 2000 mseconds");
       delay(2000);
     }
+
+    // try subscribing to device0_mode because commands will be posted there too
+    // clientptr->subscribe(topic_device0_mode);
+    
 }
 
 void setup_wifi() {
@@ -176,15 +180,14 @@ void readFromMCU() {
   * Forwards this payload to MCU and its devices.
   * Device topics are changed by being posted to from a mobile app or MQTT terminal. So
   * when the device integer and value are extracted here, they are just saved into
-  * arrays on this WiFi module. But the entire payload is forwarded to the MCU, which
-  * has to extract both of these for itself anyways.
+  * arrays on this WiFi module. 
   ****/
 void callback(char* topic, byte* payload, unsigned int length) {
   int i;
   int device_index = 0;
   char string[50];
 
-  // send payload from MQTT to Pico. the topic may specify the device.
+  // send payload from MQTT to Pico indiscriminately
   printToMCU(topic, payload, length);
 
   // Copy the payload into a C-String and convert all letters into lower-case
@@ -222,6 +225,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
       clientptr->publish(topic_general, device_msg_to_mqtt);
     }    
   }
+  
 }
 
 
@@ -300,8 +304,8 @@ void loop() {
       sensors_updated = (sensors_updated | (1<<sensor_index_element));
 
       // for debugging
-      sprintf(debugging_msg, "Sensor index: [%d], sensor read value [%f], sensors_update: [%d], sensors_online; [%d]", 
-        sensor_index_element, sensor_value_float, sensors_updated, sensors_online);
+      sprintf(debugging_msg, "Sensor index: [%d], sensor read value [%f], sensors_update: [%d]", 
+        sensor_index_element, sensor_value_float, sensors_updated);
       clientptr->publish(topic_general, debugging_msg);
     }
 
@@ -317,7 +321,7 @@ void loop() {
       int date_year = year(epochtime);
       int hours = timeClient.getHours();
 
-      // format time quantities to show leading zero if they are single-digit
+      // format time quantities with leading zeros
       char formatted_date[16];
       char date_day_s[3];
       char date_month_s[3];
@@ -327,17 +331,23 @@ void loop() {
       if (hours < 10) {sprintf(hours_s, "0%d",hours);} else {sprintf(hours_s, "%d",hours);}
       sprintf(formatted_date, "%d-%s-%s", date_year, date_month_s, date_day_s);
 
-      // minutes and seconds zeroed instead of timeClient.getFormattedTime()
-      char formatted_time[32];
-      sprintf(formatted_time, "%sT%s:00:00+%s", formatted_date, hours_s, "02:00"); // format 2022-07-09T12:00:00+02:00
-
-      // format and publish the actual json datapoint
-      sprintf(sensors_datapoint_json_msg, sensors_datapoint_json_template, (formatted_time), String(epochtime), 
+      // hourly datapoint, time format 2022-07-09T12:00:00+02:00
+      char formatted_time_hourly[32];
+      sprintf(formatted_time_hourly, "%sT%s:00:00+%s", formatted_date, hours_s, utc_timezone);
+      sprintf(sensors_datapoint_json_msg, sensors_datapoint_json_template, formatted_time_hourly, String(epochtime), 
         (sensor_array[1]), temperatureunit, (sensor_array[0]), (sensor_array[2]), mobilelink, link);
-      clientptr->publish(topic_sensors_datapoint, sensors_datapoint_json_msg);
+      clientptr->publish(topic_sensors_datapoint_hourly, sensors_datapoint_json_msg, true); // retain this datapoint
+
+      // instant datapoint
+      char formatted_time_instant[32];
+      sprintf(formatted_time_instant, "%sT%s+%s", formatted_date, timeClient.getFormattedTime(), utc_timezone); 
+      sprintf(sensors_datapoint_json_msg, sensors_datapoint_json_template, formatted_time_instant, String(epochtime), 
+        (sensor_array[1]), temperatureunit, (sensor_array[0]), (sensor_array[2]), mobilelink, link); 
+      clientptr->publish(topic_sensors_datapoint_instant, sensors_datapoint_json_msg, true); // retain this datapoint
+     
    }
    
-    /* publish message from MCU to the general Pico status topic, indiscriminately */
+    /* publish messages from MCU to the general Pico status topic, indiscriminately */
     clientptr->publish(topic_pico_status, received);
   }
   
