@@ -6,6 +6,7 @@
 
 // text templates 
 const char* device0_message = "D0=";
+const char* mode0_message = "M0=";
 const char* sensor_message = "S";
 const char* substring_from_command;
 
