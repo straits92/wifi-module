@@ -5,16 +5,15 @@
 #define SENSOR_BUFFER 16
 
 // text templates 
-const char* device0_message = "D0=";
-const char* mode0_message = "M0=";
+const char* device_message = "D";
 const char* sensor_message = "S";
-const char* substring_from_command;
-
-char* device_value_from_command;
-char* device_index_from_command;
-char msg_copy[BUFFER_SIZE];
-
+const char* mode_message = "M";
+const char* device_message_format = "D%d=%d;";
+const char* sensor_message_format = "S%d=%f;";
+const char* mode_message_format = "M%d=%d;";
 const char* pico_response_title = "\nPICO_ECHO: ";
+
+// buffers 
 char msg_from_wifi[BUFFER_SIZE];
 char sensor_buffer_out[SENSOR_BUFFER];
 

@@ -9,8 +9,10 @@
 */
 
 /**
- * Pico communicates with Wemos D1 Mini via UART; receives commands for
- * digipot resistance variation, and sends sensor readings (DHT22)
+ * Pico communicates with Wemos D1 Mini via UART; 
+ * receives commands for device outputs, 
+ * receives commands for device operation modes
+ * and sends sensor readings (DHT22, LDR) to Wemos
  **/
 
 #include "pico/stdlib.h"
@@ -30,6 +32,7 @@
 
 #include "uart_params.h"
 #include "spi_params.h"
+#include "global_params.h"
 #include "string_templates.h"
 
 // .c file; try changing CMakeLists
@@ -45,74 +48,24 @@ uint8_t swf = 0; // write flag for sensor array
 uint8_t srlf = 0; // sensor read ldr flag
 uint8_t maf = 0; // modes active flag
 
-/* global variables for devices and sensors */
+/* parameters for devices and sensors, visible throughout program */
 uint8_t devices[DEVICE_COUNT] = {0, 0};
-uint8_t modes[DEVICE_COUNT] = {0, 0};
+uint8_t modes[DEVICE_COUNT] = {0, 0}; // index corresponds to device
 float sensors[SENSOR_COUNT] = {0.0, 0.0, 0.0};
-uint32_t command_from_core0 = 0;
 float ldr_anchor = 0.0; // last value for which device0 output changed
+uint32_t wrap_point = 1000; // initial default for PWM
+uint32_t irq_command = 0; // sent by core0 to core1
 uint timer_count = 0;
-
-/* for the PWM */
-uint32_t wrap_point = 1000; // default
-
-uint32_t wrap_point_of_freq(uint hertz) {
-	/* get cycle length for desired operating frequency */
-	uint32_t nanos = 1000000000 / hertz; 
-	/* pico has a base freq of 125MHz; 125000000000Hz. 
-	 *A cycle is 8ns. The wrap point is a multiple of this. */
-	return nanos / PICO_CYCLE_NS; 
-}
-
-/* device mode changes */
-void change_device_mode(uint8_t device_index, uint8_t device_mode){
-	modes[device_index] = device_mode;
-	for (int i = 0; i< DEVICE_COUNT; i++) {
-		if (modes[i] > 0) {
-			maf = 1; // core1 must check listeners marked in modes[]
-			return;
-		}
-
-		// if any mode was switched off, kill the device output
-		// ...
-
-	}
-	maf = 0;
-}
-
-/* linear response of LED to ldr sensor readings */
-uint8_t ldr_led_linear(float ldr_reading) {
-	return (uint8_t) ( 
-			((float)LDR_DAYLIGHT_VISIBILITY - ldr_reading)
-			* (((float)MAX_LED_VAL) / ((float)LDR_DAYLIGHT_VISIBILITY)) 
-			);
-}
-
-/* general response of LED to ldr sensor readings */
-void ldr_led_response() {
-	float ldr_reading = sensors[LDR_SENSOR];
-	uint8_t linear_response = 0;
-	if (ldr_reading > (float)LDR_DAYLIGHT_VISIBILITY) {
-		ldr_anchor = (float)LDR_DAYLIGHT_VISIBILITY;
-		linear_response = MIN_LED_VAL;
-	} else if (ldr_reading < (float)LDR_DARK){
-		ldr_anchor = (float)LDR_DARK;
-		linear_response = MAX_LED_VAL;
-	} else if (abs((int)(ldr_reading - ldr_anchor)) > LDR_DELTA) {
-		ldr_anchor = ldr_reading;
-		linear_response = ldr_led_linear(ldr_reading);
-	} else {
-		return; // method returns with no activity
-	} 
-
-	smooth_change(linear_response, devices, LED_DEVICE, wrap_point);
-}
+operation_mode device_operation_modes[DEVICE_COUNT] = 
+	{&ldr_led_response, &no_operation};
+operation_mode device_shutdown_policies[DEVICE_COUNT] = 
+	{&ldr_led_shutdown, &no_operation};
 
 /* interrupt handler when core0(comm) has something for core1(devices/sensors) */
 void core1_interrupt_handler() {
 
-	uint device_index = LED_DEVICE; 
-	uint device_value = 0;
+	uint8_t device_index = LED_DEVICE; 
+	uint8_t device_value = 0;
 
 	while (multicore_fifo_rvalid()){
 		/* data in FIFO pipe may be used to differentiate which
@@ -121,24 +74,27 @@ void core1_interrupt_handler() {
 		 * bits (0 to 15) are enough for a 0 to 65535 range. every higher
 		 * bit should be an identifier for the device, leaving enough
 		 * space for 16 devices. */
-		command_from_core0 = multicore_fifo_pop_blocking();
+		irq_command = multicore_fifo_pop_blocking();
 	}
 	multicore_fifo_clear_irq();
 
-	// extract the device info from the fifo command; 0 is the first light device
-	// can be tested by adding a second device; another LED
-	// while ((command_from_core0>>(16+device_index)) != 0) {
-	// 	device_index++;
-	// }
+	// extract the device info from the fifo command; 
+	// can be tested by adding a second device; breadboard LED?
+	while ((irq_command>>(16+device_index)) != 0) {
+		device_index++;
+	}
 
 	/* many incoming device commands might hog 
-	 * core1 thread and stall the sensor reading */
-	// device_value = command_from_core0 % 65535;
-	smooth_change(command_from_core0, devices, device_index, wrap_point);
+	 * core1 thread and stall the sensor reading; 
+	 * all devices governed by smooth PWM output for now */
+	device_value = irq_command % (1<<16);
+	smooth_change(irq_command, device_index);
 }
 
 /* main program for core1 reads sensors based on timer flag, 
- * and executes device commands in interrupt triggered by core0*/
+ * executes device commands in interrupt triggered by core0,
+ * and maintains user-selected modes of device operation 
+ */
 void core1_entry() {
 
 	// conversion factor for 12-bit adc reading of LDR
@@ -148,12 +104,6 @@ void core1_entry() {
 	multicore_fifo_clear_irq();
 	irq_set_exclusive_handler(SIO_IRQ_PROC1, core1_interrupt_handler);
 	irq_set_enabled(SIO_IRQ_PROC1, true);
-
-	// set device0 output (PWM to mosfet) low to begin with
-	// smooth_change(0, devices, 0, wrap_point);
-
-	/* for the AC dimmer (interrupt should read zero-crossing AC at ~100Hz)*/
-	/* set up a PWM with a duty cycle % */
 
 	while(1) {
 		tight_loop_contents();
@@ -180,26 +130,14 @@ void core1_entry() {
 	        srlf = 0; // ldr has been read
 		}
 
-		/* if active device modes are on, carry them out */
+		/* if active device modes are on, execute mode for that device */
 		if (maf) {
-
-			// call listener for each active mode
-			// the value of the modes element i, is the number associated with listener
-			// if the value is 0, no listeners called
 			for (int i = 0; i<DEVICE_COUNT; i++) {
-
-				// first try calling fcns in nested ifs. then make fcn array.
-				if (i == 0) {
-					if (modes[i] == 1) {
-						ldr_led_response(); 
-					}
-				}
-
+				if (modes[i] == 1) {
+					device_operation_modes[i]();
+				}				
 			}
-
-
 		}
-
 
 	}
 }
@@ -222,7 +160,6 @@ bool repeating_timer_callback(struct repeating_timer *t) {
 		spf = 1; 
 	}
 
-
 	return true;
 }
 
@@ -231,12 +168,10 @@ int main() {
 
     // initialize PWM (its counter goes to 65535)
     gpio_set_function(PWM_GPIO, GPIO_FUNC_PWM);
-    uint slice_num = pwm_gpio_to_slice_num(PWM_GPIO);// see which PWM channel comes from this pin
+    uint slice_num = pwm_gpio_to_slice_num(PWM_GPIO);// map pin to PWM channel
     wrap_point = wrap_point_of_freq(PWM_OPERATING_FREQ);
     pwm_set_wrap(slice_num, wrap_point);
-
-    // set PWM channel level as duty % = 0 to begin with
-    pwm_set_chan_level(slice_num, PWM_CHAN_A, 0);
+    pwm_set_chan_level(slice_num, PWM_CHAN_A, 0); // zero initial PWM to mosfet output
     pwm_set_enabled(slice_num, true); // PWM enabled on that channel
 
     // setting up ADC0 for the light resistor: GPIO26, no pullups
@@ -299,64 +234,28 @@ int main() {
 					uart_puts(UART_ID, msg_from_wifi);
 
 					/** handle incoming commands **/
-					/* device0 output command; no commands taken when active mode for device */
-					if ((strstr(msg_from_wifi, device0_message) != NULL) && (maf == 0)) {
-
-					/*
-					if (msg_from_wifi[0] == 'D') {
-
-						// make a local copy of the message 
-						strcpy(msg_copy, msg_from_wifi);
-
-					    // extract the device specifier number from msg, between D and =
-					    device_index_from_command = strtok(msg_from_wifi, "D");
-					    device_index_from_command = strtok(NULL, "=");
+					/* device output command */
+					if ((strstr(msg_from_wifi, device_message) != NULL)) {
+					    int device_value = 0;
 					    int device_index = 0;
-					    device_index = atoi(device_index_from_command);
-
-						// extract value from msg between = and ;
-					    device_value_from_command = strtok(msg_copy, "=");
-					    device_value_from_command = strtok(NULL, ";");
-					    int val = atoi(device_value_from_command);
+					    sscanf(msg_from_wifi, device_message_format, &device_index, &device_value);
 
 					    // package the device specifier into val
-					    val = val | ((!!device_index)<<(16+device_index));
-				    */
+					    device_value = device_value | ((!!device_index)<<(16+device_index));
 
-						// extract value from msg
-					    substring_from_command = strtok(msg_from_wifi, "=");
-					    substring_from_command = strtok(NULL, ";");
-					    int val = atoi(substring_from_command);
-
-					    // extract the device specifier from msg
-					    // read between D and = ...
-
-						// send command to device/sensor core1
-						multicore_fifo_push_blocking(val);
+						// send device command to core1 if no mode active for it
+						if (modes[device_index] == 0) {
+							multicore_fifo_push_blocking(device_value);
+						}						
 					}
 
-					/* device mode command: let device0 output vary based on LDR reading */
-					/*
-
-					read the string format ... maybe M0=0 meaning mode of device 0 is routine 0
-					call the routine which executes this mode 
-						this routine takes the last LDR ,S2, reading, 
-						scales it to D0 output, 
-						writes the D0
-						does this continuously as long as the mode is on M0=1;
-
-
-					*/
-					if (strstr(msg_from_wifi, mode0_message) != NULL) {
-						uint8_t device_index = 0; // should be extracted as n from Mn=v;
-
-					    substring_from_command = strtok(msg_from_wifi, "=");
-					    substring_from_command = strtok(NULL, ";");
-					    uint8_t device_mode = (uint8_t) atoi(substring_from_command);
-
-					    change_device_mode(device_index, device_mode);
+					/* device mode command */
+					if (strstr(msg_from_wifi, mode_message) != NULL) {
+					    int device_mode = 0;
+					    int device_index = 0;
+					    sscanf(msg_from_wifi, mode_message_format, &device_index, &device_mode);
+					    change_device_mode(device_index, device_mode, &maf);
 					}
-
 
 				}
 				payload_size = 0;
@@ -367,7 +266,7 @@ int main() {
 		if (spf && !swf) {
 			for(int i = 0; i < SENSOR_COUNT; i++) {
 				// format sensor data
-				sprintf(sensor_buffer_out, "%s%d=%f;", sensor_message, i, sensors[i]);
+				sprintf(sensor_buffer_out, sensor_message_format, i, sensors[i]);
 
 				// write sensor data
 				uart_puts(UART_ID, sensor_buffer_out);
