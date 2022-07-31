@@ -78,23 +78,22 @@ void setup_mqtt() {
     shortBlink(150);
     if (clientptr->connect(clientID.c_str(), mqtt_username, mqtt_password)) {
       Serial.println("WiFi module connected to MQTT broker");
-      if(clientptr->subscribe(topic_device0_value)) { // subscribing to one topic seems to suffice
+
+      /* subscribing to command-relevant topics */
+      if(clientptr->subscribe(topic_device0_value)) { 
         clientptr->publish(topic_device0_value, "D0=0;"); // initial off-value to device
-        clientptr->publish(topic_general, "WiFi module subscribed to topic:");
-        clientptr->publish(topic_general, topic_device0_value);
-      } else {
-        Serial.println("Failed to subscribe to the specified topic");
-      }
+      } 
+      if(clientptr->subscribe(topic_device0_mode)) { 
+        clientptr->publish(topic_device0_mode, "M0=0;"); // initial off-value to mode of device0
+      } 
+      
     } else {
       Serial.print("failed, rc=");
       Serial.print(clientptr->state());
       Serial.println(" trying again in 2000 mseconds");
       delay(2000);
     }
-
-    // try subscribing to device0_mode because commands will be posted there too
-    // clientptr->subscribe(topic_device0_mode);
-    
+  
 }
 
 void setup_wifi() {
@@ -184,7 +183,6 @@ void readFromMCU() {
   ****/
 void callback(char* topic, byte* payload, unsigned int length) {
   int i;
-  int device_index = 0;
   char string[50];
 
   // send payload from MQTT to Pico indiscriminately
@@ -199,29 +197,20 @@ void callback(char* topic, byte* payload, unsigned int length) {
   /* Check if payload fits protocol for a given device; for now only device0, LED
    * Protocol: payloads sent to device topics, starting with 'D', contain commands. */
   if (/*(strstr(topic, "devices") != NULL) &&*/ (payload[0] == 'D')){
-
-    // extract the integer associated with the device
-    strcpy(payload_copy_1, string);
-    scanned_substring = strtok(payload_copy_1, "D");
-    scanned_substring = strtok(NULL, "=");
-    device_index = String(scanned_substring).toInt();
-
-    // extract num value which will modulate device power
-    strcpy(payload_copy_0, string);
-    scanned_substring = strtok(payload_copy_0, "=");
-    scanned_substring = strtok(NULL, ";");
-    int val = String(scanned_substring).toInt();
-
+    int device_value = 0;
+    int device_index = 0;
+    sscanf(string, device_message_format, &device_index, &device_value);
+              
     // remember old state of device
     device_array_old[device_index] = device_array[device_index];
-    device_array[device_index] = val;
+    device_array[device_index] = device_value;
 
     // sanity check: Wemos LED is off if a device toggled to 0, and on for bigger than 0
-    if(val > 0) {digitalWrite(ledPin, LOW); } else {digitalWrite(ledPin, HIGH);}
+    if(device_value > 0) {digitalWrite(ledPin, LOW); } else {digitalWrite(ledPin, HIGH);}
 
     // state change could be tracked for each index (i.e. for each device)
     if (device_array_old[device_index] != device_array[device_index]) {
-      sprintf(device_msg_to_mqtt, "New state of topic [%s] is [%d]; device index: [%d]; device value [%d]", topic, val, device_index, val);
+      sprintf(device_msg_to_mqtt, "New state of topic [%s] is [%d]; device index: [%d]; device value [%d]", topic, device_value, device_index, device_value);
       clientptr->publish(topic_general, device_msg_to_mqtt);
     }    
   }
@@ -280,21 +269,12 @@ void loop() {
     /* determine which topic to post Pico data to, based on format, Sn=x; for sensors, Dn=x; for devices 
      * Protocol: strings sent from MCU to Serial, starting with 'S', contain sensor data.*/
     if (received[0] == 'S'){
-      strcpy(received_copy_1, received);
-      strcpy(received_copy_0, received);
-      
-      // extract sensor index: assume it's a single digit right after 'S'
-      int sensor_index_element = String(received_copy_1[1]).toInt();
-//      scanned_substring = strtok(received_copy_1, "S");
-//      scanned_substring = strtok(NULL, "=");
-//      int sensor_index = String(scanned_substring).toInt();
-  
-      // extract sensor reading
-      scanned_substring = strtok(received_copy_0, "=");
-      scanned_substring = strtok(NULL, ";");
-      int sensor_value = String(scanned_substring).toInt(); // or toDouble()
-      float sensor_value_float = String(scanned_substring).toFloat();
-  
+      float sensor_value = 0.0;
+      int sensor_index = 0;
+      sscanf(received, sensor_message_format, &sensor_index, &sensor_value);
+      int sensor_index_element = sensor_index;
+      float sensor_value_float = sensor_value;
+       
       // remember old reading of sensor and publish new
       sensor_array_old[sensor_index_element] = sensor_array[sensor_index_element];
       sensor_array[sensor_index_element] = sensor_value_float;

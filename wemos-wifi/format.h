@@ -1,10 +1,6 @@
 #define MSG_BUFFER_SIZE (1024)
 
 // should accommodate max size of messages coming from Pico or as MQTT payload
-char payload_copy_0[16];
-char payload_copy_1[16];
-char received_copy_0[MSG_BUFFER_SIZE];
-char received_copy_1[MSG_BUFFER_SIZE];
 char sensors_datapoint_json_msg[MSG_BUFFER_SIZE];
 char debugging_msg[MSG_BUFFER_SIZE];
 char *scanned_substring;
@@ -27,6 +23,11 @@ int sensors_online = 0;
 int sensors_online_qty = 3; // for now, humidity, temperature, LDR light intensity are being read
 int device_array[2] = {-1, -1}; // LED and a placeholder device
 int device_array_old[2] = {-1, -1};
+
+// message templates 
+const char* device_message_format = "D%d=%d;";
+const char* sensor_message_format = "S%d=%f;";
+const char* mode_message_format = "M%d=%d;";
 
 // device topics - determined from elsewhere, forwarded to MCU. 
 const char* topic_device0_status = "devices/LED_0/status";
