@@ -85,7 +85,10 @@ void setup_mqtt() {
       } 
       if(clientptr->subscribe(topic_device0_mode)) { 
         clientptr->publish(topic_device0_mode, "M0=0;"); // initial off-value to mode of device0
-      } 
+      }
+//      if(clientptr->subscribe(topic_device0_status)) { 
+//        clientptr->publish(topic_device0_status, "empty_status"); // initial off-value to status of device0
+//      }
       
     } else {
       Serial.print("failed, rc=");
@@ -255,13 +258,12 @@ void setup() {
 void loop() {  
   if (!clientptr->connected()) {
     Serial.print("Connection dropped - reconnecting...");
-    connection_status = 0;
     reconnect();
   }
 
 
   /* Read from pico and publish its msgs, only if wifi+mqtt are connected. generally for sensors. */
-  if (Serial.available() > 0 /*&& connection_status == 2*/) {
+  if (Serial.available() > 0) {
     
     /* build string from Pico in "received" */
     readFromMCU();
@@ -326,6 +328,19 @@ void loop() {
       clientptr->publish(topic_sensors_datapoint_instant, sensors_datapoint_json_msg, true); // retain this datapoint
      
    }
+
+    // read echoed device commands from Pico and interpret them as devices being online 
+    if (received[0] == 'D'){
+      timeClient.update();
+      int device_index = 0;
+      int device_value = 0;
+      sscanf(received, device_message_format, &device_index, &device_value);
+      sprintf(device_json_msg, device_json_template, device_index, device_value, timeClient.getEpochTime(),"device_state_placeholder"); 
+      clientptr->publish(device_json_topics[device_index],device_json_msg, true);
+      
+      // for debugging
+      clientptr->publish(topic_general, device_json_msg);
+    }
    
     /* publish messages from MCU to the general Pico status topic, indiscriminately */
     clientptr->publish(topic_pico_status, received);
