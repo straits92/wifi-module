@@ -47,8 +47,10 @@ uint8_t srdf = 0; // sensor read DHT22 flag
 uint8_t swf = 0; // write flag for sensor array
 uint8_t srlf = 0; // sensor read ldr flag
 uint8_t maf = 0; // modes active flag
+uint8_t g_dcif = 0; // global device command implemented flag
 
 /* parameters for devices and sensors, visible throughout program */
+uint8_t device_being_changed = NO_DEVICE;
 uint8_t devices[DEVICE_COUNT] = {0, 0};
 uint8_t modes[DEVICE_COUNT] = {0, 0}; // index corresponds to device
 float sensors[SENSOR_COUNT] = {0.0, 0.0, 0.0};
@@ -210,7 +212,7 @@ int main() {
 	// start core1 activity with its own main function
 	multicore_launch_core1(core1_entry);
 
-	uart_puts(UART_ID, "Putting the first few characters to UART...\n");
+	uart_puts(UART_ID, "C0=[Putting the first few characters to UART...];\n");
 	int payload_size = 0;
 
 	/* Pico default CPU speed is 125 MHz. UART is configured as 115200 baud rate.
@@ -229,9 +231,10 @@ int main() {
 				msg_from_wifi[payload_size] = '\0';
 
 				if (payload_size != 0) {
-					// echo
-					uart_puts(UART_ID, pico_response_title);	
-					uart_puts(UART_ID, msg_from_wifi);
+					/* echo everything; an echoed device command is an assumption the command was done */
+					sprintf(comment_buffer_out, comment_message_format, PICO_COMMENTS, msg_from_wifi);
+					uart_puts(UART_ID, comment_buffer_out);
+					uart_puts(UART_ID, "\n");	
 
 					/** handle incoming commands **/
 					/* device output command */
@@ -265,14 +268,23 @@ int main() {
 		/* writing to Tx when sensor data safely written to array  */
 		if (spf && !swf) {
 			for(int i = 0; i < SENSOR_COUNT; i++) {
-				// format sensor data
 				sprintf(sensor_buffer_out, sensor_message_format, i, sensors[i]);
-
-				// write sensor data
 				uart_puts(UART_ID, sensor_buffer_out);
 				uart_puts(UART_ID, "\n");				
 			}
 			spf = 0; // sensor data has been posted
 		}
+
+		/* write the implemented device value to Tx once it is 
+		 * carried out and written to D array */
+		if (g_dcif && (device_being_changed > NO_DEVICE)) {
+			sprintf(device_buffer_out, device_message_format, 
+				device_being_changed, devices[device_being_changed]);
+			uart_puts(UART_ID, device_buffer_out);
+			uart_puts(UART_ID, "\n");
+			device_being_changed = NO_DEVICE;
+			g_dcif = 0;
+		}
+
     }
 }

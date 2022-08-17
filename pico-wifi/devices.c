@@ -12,7 +12,14 @@ void write_to_digipot(uint8_t intensity) {
 	gpio_put(CS, 1);
 }
 
-/* calculate wrap point for the PWM */
+/* calculate wrap point for the PWM. The wrap point determines
+ * the multiple of Pico cycles needed to make up one full cycle
+ * for a desired PWM output frequency. Hence it is a "wrap point"
+ * as after a certain number of Pico cycles, the new cycle of
+ * the desired frequency should begin. A smaller wrap point
+ * means faster PWM variation for the higher frequency. This
+ * might mean higher switching losses for the module receiving
+ * the PWM signal. */
 uint32_t wrap_point_of_freq(uint hertz) {
 	/* get cycle length for desired operating frequency */
 	uint32_t nanos = 1000000000 / hertz; 
@@ -21,13 +28,14 @@ uint32_t wrap_point_of_freq(uint hertz) {
 	return nanos / PICO_CYCLE_NS; 
 }
 
-/* take the remote command between 0 and 127 and convert to between 0 and 1000 for PWM */
+/* take the remote command between 0 and 127 and convert to between 0 and the 
+ * wrap_point for PWM */
 long map_to_pwm(long x, long in_min, long in_max, long out_min, long out_max) {
 	return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
 /* gradual change from current value to desired value of device */
-void smooth_change(uint8_t desired_intensity/*, uint8_t *device_array*/, uint device_index/*, uint32_t wrap_point*/) {
+void smooth_change(uint8_t desired_intensity, uint device_index) {
 	uint8_t current_intensity = devices[device_index];
 
 	if (desired_intensity == current_intensity) {
@@ -51,8 +59,10 @@ void smooth_change(uint8_t desired_intensity/*, uint8_t *device_array*/, uint de
 	}
 	pwm_set_chan_level(slice_num, PWM_CHAN_A, pwm_value_desired); // avoid off by one
 
-	// make array update safer
+	// device updates only available for posting after writing done
 	devices[device_index] = desired_intensity;
+	device_being_changed = device_index;
+	g_dcif = 1;	
 }
 
 /*** device mode changes ***/

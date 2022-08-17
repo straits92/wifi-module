@@ -4,6 +4,9 @@
 #include "devices.h"
 #include "sensors.h"
 
+// mark all with g_ ??
+extern uint8_t device_being_changed;
+extern uint8_t g_dcif; // flag must be global for device policies
 extern uint8_t devices[DEVICE_COUNT];
 extern uint8_t modes[DEVICE_COUNT];
 extern float sensors[SENSOR_COUNT];
