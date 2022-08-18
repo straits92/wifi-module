@@ -71,35 +71,37 @@ void initMQTTClient(int verbose) {
   clientptr->setCallback(callback);
 }
 
-void setup_mqtt() {
-    // Serial.println("Attempting MQTT connection...");
+/* subscribing to all device topics which need initial published content */
+void subscribeToDeviceTopics() {
+  
+  if(clientptr->subscribe(topic_device0_value)) { 
+    clientptr->publish(topic_device0_value, "D0=0;"); // initial off-value to device
+  } 
+  if(clientptr->subscribe(topic_device0_mode)) { 
+    clientptr->publish(topic_device0_mode, "M0=0;"); // initial off-value to mode of device0
+  }
+//  if(clientptr->subscribe(topic_device0_status)) { 
+//    clientptr->publish(topic_device0_status, "empty_status"); // initial off-value to status of device0
+//  }
+
+}
+
+void setupMQTT() {
     String clientID = "WemosD1Mini-";
     clientID+=String(random(0xffff), HEX);
     shortBlink(150);
     if (clientptr->connect(clientID.c_str(), mqtt_username, mqtt_password)) {
       Serial.println("WiFi module connected to MQTT broker");
-
-      /* subscribing to command-relevant topics */
-      if(clientptr->subscribe(topic_device0_value)) { 
-        clientptr->publish(topic_device0_value, "D0=0;"); // initial off-value to device
-      } 
-      if(clientptr->subscribe(topic_device0_mode)) { 
-        clientptr->publish(topic_device0_mode, "M0=0;"); // initial off-value to mode of device0
-      }
-//      if(clientptr->subscribe(topic_device0_status)) { 
-//        clientptr->publish(topic_device0_status, "empty_status"); // initial off-value to status of device0
-//      }
-      
+      subscribeToDeviceTopics(); 
     } else {
       Serial.print("failed, rc=");
       Serial.print(clientptr->state());
       Serial.println(" trying again in 2000 mseconds");
       delay(2000);
     }
-  
 }
 
-void setup_wifi() {
+void setupWiFi() {
   delay(10);
   Serial.println();
   Serial.print("WiFi name: ");
@@ -122,9 +124,9 @@ void setup_wifi() {
 void reconnect() {
   while (!clientptr->connected()) {
     if(WiFi.status() != WL_CONNECTED) {
-      setup_wifi();
+      setupWiFi();
     } 
-    setup_mqtt(); // if wifi dropped, mqtt lost connection too
+    setupMQTT(); // if wifi dropped, mqtt lost connection too
   }
 }
 
@@ -199,7 +201,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
   /* Check if payload fits protocol for a given device; for now only device0, LED
    * Protocol: payloads sent to device topics, starting with 'D', contain commands. */
-  if (/*(strstr(topic, "devices") != NULL) &&*/ (payload[0] == 'D')){
+  if ((payload[0] == 'D')){
     int device_value = 0;
     int device_index = 0;
     sscanf(string, device_message_format, &device_index, &device_value);
@@ -213,7 +215,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
     // state change could be tracked for each index (i.e. for each device)
     if (device_array_old[device_index] != device_array[device_index]) {
-      sprintf(device_msg_to_mqtt, "New state of topic [%s] is [%d]; device index: [%d]; device value [%d]", topic, device_value, device_index, device_value);
+      sprintf(device_msg_to_mqtt, "New state of topic [%s] is [%d]\n", topic, device_value);
       clientptr->publish(topic_general, device_msg_to_mqtt);
     }    
   }
@@ -225,7 +227,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
  * Called once during the initialization phase after reset
  ****/
 void setup() {
-  // setup serial port with same baud rate as UART on pico
+  // setup serial port with same baud rate as UART on the Pico MCU
   delay(500);
   Serial.begin(115200);
   delay(500);
@@ -236,14 +238,14 @@ void setup() {
   
   // start certification module, connect to the internet
   LittleFS.begin();
-  setup_wifi();
+  setupWiFi();
   setDateTime();
 
   // start tracking time
   timeClient.begin();
   
   // set up MQTT and the certificate for secure comm with broker
-  initMQTTClient(0);
+  initMQTTClient(SILENT);
 
   // set up the working sensor bits upon initialization
   for (int i = 0; i < sensors_online_qty; i++) {
@@ -261,21 +263,19 @@ void loop() {
     reconnect();
   }
 
-
   /* Read from pico and publish its msgs, only if wifi+mqtt are connected. generally for sensors. */
   if (Serial.available() > 0) {
     
     /* build string from Pico in "received" */
     readFromMCU();
 
-    /* determine which topic to post Pico data to, based on format, Sn=x; for sensors, Dn=x; for devices 
-     * Protocol: strings sent from MCU to Serial, starting with 'S', contain sensor data.*/
+    /* determine which topic to post Pico data to, based on format, 
+     * S%d=%f; for sensors, D%d=%d; for devices; C%d=[%s]; for comments
+     */
     if (received[0] == 'S'){
-      float sensor_value = 0.0;
-      int sensor_index = 0;
-      sscanf(received, sensor_message_format, &sensor_index, &sensor_value);
-      int sensor_index_element = sensor_index;
-      float sensor_value_float = sensor_value;
+      int sensor_index_element = 0;
+      float sensor_value_float = 0.0;      
+      sscanf(received, sensor_message_format, &sensor_index_element, &sensor_value_float);
        
       // remember old reading of sensor and publish new
       sensor_array_old[sensor_index_element] = sensor_array[sensor_index_element];
@@ -285,10 +285,11 @@ void loop() {
       // record which sensors updated
       sensors_updated = (sensors_updated | (1<<sensor_index_element));
 
-      // for debugging
-      sprintf(debugging_msg, "Sensor index: [%d], sensor read value [%f], sensors_update: [%d]", 
-        sensor_index_element, sensor_value_float, sensors_updated);
-      clientptr->publish(topic_general, debugging_msg);
+      if (DEBUG) {
+        sprintf(debugging_msg, "Sensor index: [%d], sensor read value [%f], sensors_update: [%d]", 
+          sensor_index_element, sensor_value_float, sensors_updated);
+        clientptr->publish(topic_general, debugging_msg);
+      }
     }
 
    /* build the json template with timestamp, and post to topic when all sensors refreshed */
@@ -338,8 +339,9 @@ void loop() {
       sprintf(device_json_msg, device_json_template, device_index, device_value, timeClient.getEpochTime(),"device_state_placeholder"); 
       clientptr->publish(device_json_topics[device_index],device_json_msg, true);
       
-      // for debugging
-      clientptr->publish(topic_general, device_json_msg);
+      if (DEBUG) {
+        clientptr->publish(topic_general, device_json_msg);
+      }
     }
    
     /* publish messages from MCU to the general Pico status topic, indiscriminately */

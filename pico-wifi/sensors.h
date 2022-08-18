@@ -11,9 +11,9 @@
 #define SENSOR_LDR_READ_PERIOD 1 // *2 seconds
 
 // LDR empirical constants
-#define LDR_DAYLIGHT_VISIBILITY 50
+#define LDR_DAYLIGHT_VISIBILITY 40
 #define LDR_DARK 1
-#define LDR_DELTA 3 // % brightness change for which device0 should update
+#define LDR_DELTA 2 // % brightness change for which device0 should update
 
 // sensor indices
 #define HUMID_SENSOR 0

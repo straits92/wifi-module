@@ -28,13 +28,18 @@ uint32_t wrap_point_of_freq(uint hertz) {
 	return nanos / PICO_CYCLE_NS; 
 }
 
-/* take the remote command between 0 and 127 and convert to between 0 and the 
- * wrap_point for PWM */
+/* scale the remote command to between 0 and the wrap_point for PWM */
 long map_to_pwm(long x, long in_min, long in_max, long out_min, long out_max) {
 	return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
 /* gradual change from current value to desired value of device */
+/* incoming device command is about 0 to 100. 
+ * it needs to be mapped to a value between 0 and wrap_point.
+ * but for the MOSFET max frequency of 20kHz, the LED device is 
+ * sensitive to only 10% of the duty cycle.
+ * so, the incoming device command should be mapped to that 
+ * segment of the duty cycle. */
 void smooth_change(uint8_t desired_intensity, uint device_index) {
 	uint8_t current_intensity = devices[device_index];
 
@@ -42,8 +47,14 @@ void smooth_change(uint8_t desired_intensity, uint device_index) {
 		return;
 	}
 
-	long pwm_value_desired = map_to_pwm((long)desired_intensity, 0, 128, 0, wrap_point);
-	long pwm_value_current = map_to_pwm((long)current_intensity, 0, 128, 0, wrap_point);
+	/* set the scaling factor for the target device */
+	uint32_t scaling_factor = LED_PWM_SENSITIVITY;
+	uint32_t max_pwm_out = (wrap_point * scaling_factor) / 100;
+
+	long pwm_value_desired = map_to_pwm((long)desired_intensity, 
+		MIN_INCOMING_INPUT, MAX_INCOMING_INPUT, 0, max_pwm_out);
+	long pwm_value_current = map_to_pwm((long)current_intensity, 
+		MIN_INCOMING_INPUT, MAX_INCOMING_INPUT, 0, max_pwm_out);
 	uint slice_num = pwm_gpio_to_slice_num(PWM_GPIO);
 
 	if (pwm_value_desired > pwm_value_current) {
@@ -88,10 +99,10 @@ void change_device_mode(uint8_t device_index, uint8_t device_mode, uint8_t *mode
 
 /* linear magnitude of LED output wrt ldr sensor readings */
 uint8_t ldr_led_linear(float ldr_reading) {
-	return (uint8_t) ( 
+	return (uint8_t)( 
 			((float)LDR_DAYLIGHT_VISIBILITY - ldr_reading)
-			* (((float)MAX_LED_VAL) / ((float)LDR_DAYLIGHT_VISIBILITY)) 
-			);
+			* (((float)MAX_INCOMING_INPUT) / ((float)LDR_DAYLIGHT_VISIBILITY)) 
+					);
 }
 
 /* general response of LED to ldr sensor readings */
@@ -100,10 +111,10 @@ void ldr_led_response() {
 	uint8_t linear_response = 0;
 	if (ldr_reading > (float)LDR_DAYLIGHT_VISIBILITY) {
 		ldr_anchor = (float)LDR_DAYLIGHT_VISIBILITY;
-		linear_response = MIN_LED_VAL;
+		linear_response = MIN_INCOMING_INPUT;
 	} else if (ldr_reading < (float)LDR_DARK){
 		ldr_anchor = (float)LDR_DARK;
-		linear_response = MAX_LED_VAL;
+		linear_response = MAX_INCOMING_INPUT;
 	} else if (abs((int)(ldr_reading - ldr_anchor)) > LDR_DELTA) {
 		ldr_anchor = ldr_reading;
 		linear_response = ldr_led_linear(ldr_reading);
@@ -111,7 +122,7 @@ void ldr_led_response() {
 		return; // method returns with no activity
 	} 
 
-	smooth_change(linear_response/*, devices*/, LED_DEVICE/*, wrap_point*/);
+	smooth_change(linear_response, LED_DEVICE);
 }
 
 /* empty mode response */
@@ -121,5 +132,5 @@ void no_operation() {
 
 /* shutdown LDR-dependent LED response*/
 void ldr_led_shutdown() {
-	smooth_change(MIN_LED_VAL, LED_DEVICE);
+	smooth_change(MIN_INCOMING_INPUT, LED_DEVICE);
 }

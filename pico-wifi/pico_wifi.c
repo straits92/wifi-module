@@ -1,3 +1,9 @@
+/**
+ * Pico communicates with Wemos D1 Mini via UART; 
+ * receives commands for device outputs and operation modes, 
+ * and sends sensor readings (DHT22, LDR), over Wemos
+ **/
+
 /*
  * Set-up instructions for the Pico:
  * Ensure this project dir has the same parent as pico-sdk dir
@@ -7,13 +13,6 @@
  * Connect the Pico in boot mode via USB-to-microUSB cable
  * Copy the file, eject "scp pico_wifi.uf2 /media/an/RPI-RP2/pico_wifi.uf2"
 */
-
-/**
- * Pico communicates with Wemos D1 Mini via UART; 
- * receives commands for device outputs, 
- * receives commands for device operation modes
- * and sends sensor readings (DHT22, LDR) to Wemos
- **/
 
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
@@ -57,39 +56,32 @@ float sensors[SENSOR_COUNT] = {0.0, 0.0, 0.0};
 float ldr_anchor = 0.0; // last value for which device0 output changed
 uint32_t wrap_point = 1000; // initial default for PWM
 uint32_t irq_command = 0; // sent by core0 to core1
+uint32_t device_mask = 1;
 uint timer_count = 0;
 operation_mode device_operation_modes[DEVICE_COUNT] = 
 	{&ldr_led_response, &no_operation};
 operation_mode device_shutdown_policies[DEVICE_COUNT] = 
 	{&ldr_led_shutdown, &no_operation};
 
-/* interrupt handler when core0(comm) has something for core1(devices/sensors) */
+/* interrupt handler when core0(comm) has something for core1(devices/sensors);
+ * many incoming device commands might hog core1 and stall sensor reading  */
 void core1_interrupt_handler() {
 
 	uint8_t device_index = LED_DEVICE; 
 	uint8_t device_value = 0;
 
 	while (multicore_fifo_rvalid()){
-		/* data in FIFO pipe may be used to differentiate which
-		 * device a queued command is for. so since the queued 
-		 * data is uint32_t, maybe package as follows. the first 16
-		 * bits (0 to 15) are enough for a 0 to 65535 range. every higher
-		 * bit should be an identifier for the device, leaving enough
-		 * space for 16 devices. */
 		irq_command = multicore_fifo_pop_blocking();
 	}
 	multicore_fifo_clear_irq();
 
-	// extract the device info from the fifo command; 
-	// can be tested by adding a second device; breadboard LED?
+	/* extract the device index from the fifo command: upper 16 bits */
 	while ((irq_command>>(16+device_index)) != 0) {
 		device_index++;
 	}
 
-	/* many incoming device commands might hog 
-	 * core1 thread and stall the sensor reading; 
-	 * all devices governed by smooth PWM output for now */
-	device_value = irq_command % (1<<16);
+	/* extract desired device intensity: lower 16 bits, 0 - 65535 */
+	device_value = irq_command % device_mask;
 	smooth_change(irq_command, device_index);
 }
 
@@ -102,13 +94,16 @@ void core1_entry() {
 	// conversion factor for 12-bit adc reading of LDR
 	const float ldr_cf = 100.0f / (1<<12); 
 
+	// modulus mask for extracting device value
+	device_mask = (1<<16);
+
 	// configure the interrupt
 	multicore_fifo_clear_irq();
 	irq_set_exclusive_handler(SIO_IRQ_PROC1, core1_interrupt_handler);
 	irq_set_enabled(SIO_IRQ_PROC1, true);
 
 	while(1) {
-		tight_loop_contents();
+		// tight_loop_contents();
 
 		/* read DHT22 based on timer flag */
 		if (srdf) {
@@ -231,7 +226,7 @@ int main() {
 				msg_from_wifi[payload_size] = '\0';
 
 				if (payload_size != 0) {
-					/* echo everything; an echoed device command is an assumption the command was done */
+					/* package as comment and echo everything */
 					sprintf(comment_buffer_out, comment_message_format, PICO_COMMENTS, msg_from_wifi);
 					uart_puts(UART_ID, comment_buffer_out);
 					uart_puts(UART_ID, "\n");	
@@ -265,7 +260,7 @@ int main() {
 			} 
 		}
 
-		/* writing to Tx when sensor data safely written to array  */
+		/* write sensor data to Tx after any changes to S array  */
 		if (spf && !swf) {
 			for(int i = 0; i < SENSOR_COUNT; i++) {
 				sprintf(sensor_buffer_out, sensor_message_format, i, sensors[i]);
