@@ -6,7 +6,7 @@ The Pico reads the DHT22 sensor for temperature and humidity, and an LDR input o
 
 **Basic hardware configuration**
 
-![image](https://user-images.githubusercontent.com/85231028/188331018-2f5fdd82-5f84-42f6-afa9-ff0a245749f3.png)
+![image](https://user-images.githubusercontent.com/85231028/188331107-fad5639a-78a4-4a61-ad08-eed8f66dd497.png)
 
 **Hardware list**
 
