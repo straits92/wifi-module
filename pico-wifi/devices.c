@@ -28,20 +28,18 @@ uint32_t wrap_point_of_freq(uint hertz) {
 	return nanos / PICO_CYCLE_NS; 
 }
 
-/* scale the remote command to between 0 and the wrap_point for PWM */
+/* scale the remote command to between 0 and the g_wrap_point for PWM */
 long map_to_pwm(long x, long in_min, long in_max, long out_min, long out_max) {
 	return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
 /* gradual change from current value to desired value of device */
-/* incoming device command is about 0 to 100. 
- * it needs to be mapped to a value between 0 and wrap_point.
- * but for the MOSFET max frequency of 20kHz, the LED device is 
- * sensitive to only 10% of the duty cycle.
- * so, the incoming device command should be mapped to that 
- * segment of the duty cycle. */
+/* input 0 to 100 mapped to a value between 0 and g_wrap_point.
+ * the LED device is sensitive to only 10% of the duty cycle 
+ * given to MOSFET 20kHz; command mapped to that 10%.
+ * */
 void smooth_change(uint8_t desired_intensity, uint device_index) {
-	uint8_t current_intensity = devices[device_index];
+	uint8_t current_intensity = g_devices[device_index];
 
 	if (desired_intensity == current_intensity) {
 		return;
@@ -49,11 +47,11 @@ void smooth_change(uint8_t desired_intensity, uint device_index) {
 
 	/* set the scaling factor for the target device */
 	uint32_t scaling_factor = LED_PWM_SENSITIVITY;
-	uint32_t max_pwm_out = (wrap_point * scaling_factor) / 100;
+	uint32_t max_pwm_out = (g_wrap_point * scaling_factor) / 100;
 
 	long pwm_value_desired = map_to_pwm((long)desired_intensity, 
 		MIN_INCOMING_INPUT, MAX_INCOMING_INPUT, 0, max_pwm_out);
-	long pwm_value_current = map_to_pwm((long)current_intensity, 
+	long pwm_value_current = map_to_pwm((long)current_intensity,   
 		MIN_INCOMING_INPUT, MAX_INCOMING_INPUT, 0, max_pwm_out);
 	uint slice_num = pwm_gpio_to_slice_num(PWM_GPIO);
 
@@ -71,26 +69,35 @@ void smooth_change(uint8_t desired_intensity, uint device_index) {
 	pwm_set_chan_level(slice_num, PWM_CHAN_A, pwm_value_desired); // avoid off by one
 
 	// device updates only available for posting after writing done
-	devices[device_index] = desired_intensity;
-	device_being_changed = device_index;
+	g_devices[device_index] = desired_intensity;
+	g_device_being_changed = device_index;
 	g_dcif = 1;	
+}
+
+/* device output changes; only LED device for now;
+ * this can also be modelled as an array of functions 
+ * */
+void change_device_output(uint8_t device_index, uint32_t device_value) {
+	if (device_index == LED_DEVICE) {
+		smooth_change(device_value, device_index);
+	}
 }
 
 /*** device mode changes ***/
 
-/* trigger a mode change in a device*/
+/* trigger a mode change in a device; called from core0 */
 void change_device_mode(uint8_t device_index, uint8_t device_mode, uint8_t *modeflag){
-	modes[device_index] = device_mode;
+	g_modes[device_index] = device_mode;
 
-	// device shutdown if a mode is turned off
-	if (device_mode == 0) {
-		device_shutdown_policies[device_index]();
-	}
+	// device shutdown if a mode is turned off, or when there's a mode change
+	// if (device_mode == 0) {
+		g_device_shutdown_policies[device_index]();
+	// }
 
 	// check for active modes 
 	for (int i = 0; i< DEVICE_COUNT; i++) {
-		if (modes[i] > 0) {
-			*modeflag = 1; // core1 must check listeners marked in modes[]
+		if (g_modes[i] > 0) {
+			*modeflag = 1; // core1 must check listeners marked in g_modes[]
 			return;
 		}
 	}
@@ -107,16 +114,16 @@ uint8_t ldr_led_linear(float ldr_reading) {
 
 /* general response of LED to ldr sensor readings */
 void ldr_led_response() {
-	float ldr_reading = sensors[LDR_SENSOR];
+	float ldr_reading = g_sensors[LDR_SENSOR];
 	uint8_t linear_response = 0;
 	if (ldr_reading > (float)LDR_DAYLIGHT_VISIBILITY) {
-		ldr_anchor = (float)LDR_DAYLIGHT_VISIBILITY;
+		g_ldr_anchor = (float)LDR_DAYLIGHT_VISIBILITY;
 		linear_response = MIN_INCOMING_INPUT;
 	} else if (ldr_reading < (float)LDR_DARK){
-		ldr_anchor = (float)LDR_DARK;
+		g_ldr_anchor = (float)LDR_DARK;
 		linear_response = MAX_INCOMING_INPUT;
-	} else if (abs((int)(ldr_reading - ldr_anchor)) > LDR_DELTA) {
-		ldr_anchor = ldr_reading;
+	} else if (abs((int)(ldr_reading - g_ldr_anchor)) > LDR_DELTA) {
+		g_ldr_anchor = ldr_reading;
 		linear_response = ldr_led_linear(ldr_reading);
 	} else {
 		return; // method returns with no activity
@@ -133,4 +140,13 @@ void no_operation() {
 /* shutdown LDR-dependent LED response*/
 void ldr_led_shutdown() {
 	smooth_change(MIN_INCOMING_INPUT, LED_DEVICE);
+}
+
+/* device command protocol implemented here */
+uint32_t encode_command(uint32_t value, uint32_t index, uint32_t msb) {
+	return value | ((!!index)<<(16+index)) | msb;
+}
+
+uint32_t decode_command(uint32_t cmd) {
+	return cmd & DEVICE_MODE_BIT;
 }

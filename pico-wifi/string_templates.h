@@ -19,6 +19,7 @@ const char* device_message_format = "D%d=%d;";
 const char* sensor_message_format = "S%d=%f;";
 const char* mode_message_format = "M%d=%d;";
 const char* pico_response_title = "PICO_ECHO";
+const char* service_denied_default = "SERVICE DENIED: CORE1 BUSY";
 
 // buffers 
 char msg_from_wifi[BUFFER_SIZE];

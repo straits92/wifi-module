@@ -2,17 +2,17 @@
 #define SENSORS_H
 
 #define SENSOR_COUNT 3 // temperature, humidity, brightness
-#define DEVICE_COUNT 2
+#define DEVICE_COUNT 2 // LED and a placeholder
 #define TIMER_PERIOD 2000 // every 2 seconds
 
 // reading and publishing as multiples of timer period
 #define SENSOR_PUBLISH_PERIOD 10 // send to WiFi module every 2*10 seconds
-#define SENSOR_DHT_READ_PERIOD 5 // *2 seconds
+#define SENSOR_DHT_READ_PERIOD 3 // *2 seconds
 #define SENSOR_LDR_READ_PERIOD 1 // *2 seconds
 
 // LDR empirical constants
 #define LDR_DAYLIGHT_VISIBILITY 40
-#define LDR_DARK 1
+#define LDR_DARK 4
 #define LDR_DELTA 2 // % brightness change for which device0 should update
 
 // sensor indices
