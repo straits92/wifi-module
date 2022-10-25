@@ -56,5 +56,6 @@ void ldr_led_shutdown();
 
 uint32_t encode_command(uint32_t value, uint32_t index, uint32_t msb);
 uint32_t decode_command(uint32_t cmd);
+uint8_t check_core1_status(uint8_t dmf, uint8_t dcf);
 
 #endif

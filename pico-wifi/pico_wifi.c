@@ -58,8 +58,7 @@ uint8_t g_modes[DEVICE_COUNT] = {0, 0}; // index corresponds to device
 float g_sensors[SENSOR_COUNT] = {0.0, 0.0, 0.0};
 float g_ldr_anchor = 0.0; // last value for which device0 output changed
 uint32_t g_wrap_point = 1000; // initial default for PWM
-uint32_t irq_command = 0; // sent by core0 to core1
-uint32_t device_mask = 1;
+uint32_t device_mask = 1<<16; // at compile time; otherwise, fix, do in main()
 uint timer_count = 0;
 
 uint32_t g_device_value = 0;
@@ -75,18 +74,19 @@ operation_mode g_device_shutdown_policies[DEVICE_COUNT] =
  * */
 void core1_interrupt_handler() {
 	uint8_t device_index = LED_DEVICE; 
-	uint32_t device_value = 0;
+	uint32_t device_value = MIN_INCOMING_INPUT;
 	uint32_t command_type = DEVICE_OUTPUT_BIT;
+	uint32_t irq_command = 0;
 
 	while (multicore_fifo_rvalid()){
 		irq_command = multicore_fifo_pop_blocking();
 	}
 	multicore_fifo_clear_irq();
 
-	if ((dmf | dcf) != 0) {
-		/* service denied -> previous change flags were not cleared; 
-		 * consider adding further info on what and why */
-		service_denied = 1;
+	/* service denied -> previous change flags were not cleared; 
+	 * consider adding further info on what and why */
+	service_denied = check_core1_status(dmf, dcf);
+	if ((service_denied > 0) {
 		return;
 	}	
 
@@ -123,9 +123,6 @@ void core1_main() {
 
 	// conversion factor for 12-bit adc reading of LDR
 	const float ldr_cf = 100.0f / (1<<12); 
-
-	// modulus mask for extracting device value
-	device_mask = (1<<16);
 
 	// configure the interrupt
 	multicore_fifo_clear_irq();

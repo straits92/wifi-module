@@ -150,3 +150,7 @@ uint32_t encode_command(uint32_t value, uint32_t index, uint32_t msb) {
 uint32_t decode_command(uint32_t cmd) {
 	return cmd & DEVICE_MODE_BIT;
 }
+
+uint8_t check_core1_status(uint8_t dmf, uint8_t dcf) {
+	return dmf | (dcf << 1);
+}
