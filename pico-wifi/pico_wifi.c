@@ -58,7 +58,7 @@ uint8_t g_modes[DEVICE_COUNT] = {0, 0}; // index corresponds to device
 float g_sensors[SENSOR_COUNT] = {0.0, 0.0, 0.0};
 float g_ldr_anchor = 0.0; // last value for which device0 output changed
 uint32_t g_wrap_point = 1000; // initial default for PWM
-uint32_t device_mask = 1;
+uint32_t device_mask = 1<<16; // at compile time; otherwise, fix, do in main()
 uint timer_count = 0;
 
 uint32_t g_device_value = 0;
@@ -123,9 +123,6 @@ void core1_main() {
 
 	// conversion factor for 12-bit adc reading of LDR
 	const float ldr_cf = 100.0f / (1<<12); 
-
-	// modulus mask for extracting device value
-	device_mask = (1<<16);
 
 	// configure the interrupt
 	multicore_fifo_clear_irq();
